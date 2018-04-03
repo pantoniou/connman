@@ -277,6 +277,7 @@ struct interface_create_data {
 	GSupplicantInterface *interface;
 	GSupplicantInterfaceCallback callback;
 	void *user_data;
+	bool postponed_creation;
 };
 
 struct interface_connect_data {
@@ -2287,13 +2288,24 @@ static void interface_property(const char *key, DBusMessageIter *iter,
 			interface->p2p_support = true;
 	} else if (g_strcmp0(key, "State") == 0) {
 		const char *str = NULL;
+		bool signal_state_change = false;
 
 		dbus_message_iter_get_basic(iter, &str);
 		if (str)
 			if (string2state(str) != interface->state) {
 				interface->state = string2state(str);
-				callback_interface_state(interface);
+				signal_state_change = true;
 			}
+
+		if (interface->state == G_SUPPLICANT_STATE_DISABLED)
+			interface->ready = FALSE;
+		else
+			interface->ready = TRUE;
+
+		SUPPLICANT_DBG("state %s (%d)", str, interface->state);
+
+		if (signal_state_change)
+			callback_interface_state(interface);
 
 		if (interface->ap_create_in_progress) {
 			if (interface->state == G_SUPPLICANT_STATE_DISCONNECTED)
@@ -2302,12 +2314,6 @@ static void interface_property(const char *key, DBusMessageIter *iter,
 			interface->ap_create_in_progress = false;
 		}
 
-		if (interface->state == G_SUPPLICANT_STATE_DISABLED)
-			interface->ready = FALSE;
-		else
-			interface->ready = TRUE;
-
-		SUPPLICANT_DBG("state %s (%d)", str, interface->state);
 	} else if (g_strcmp0(key, "Scanning") == 0) {
 		dbus_bool_t scanning = FALSE;
 
@@ -3871,6 +3877,13 @@ static void interface_create_result(const char *error,
 		}
 	}
 
+	if (data->postponed_creation) {
+		SUPPLICANT_DBG("Issueing postponed creation callback");
+		data->postponed_creation = false;
+		data->callback(0, data->interface, data->user_data);
+		callback_p2p_support(data->interface);
+	}
+
 	err = supplicant_dbus_property_get_all(path,
 					SUPPLICANT_INTERFACE ".Interface",
 					interface_create_property, data,
@@ -3929,6 +3942,7 @@ static void interface_get_result(const char *error,
 
 	if (error) {
 		SUPPLICANT_DBG("Interface not created yet");
+		data->postponed_creation = true;
 		goto create;
 	}
 
